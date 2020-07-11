@@ -3,6 +3,7 @@ import logging
 import select
 import socket
 import threading
+import shutil
 
 
 def _eintr_retry(func, *args):
@@ -165,7 +166,7 @@ class TCPServer:
 
         try:
             self.process_request(request)
-        except Exception:
+        except Exception as e:
             self.handle_error(conn, client_address)
         finally:
             request.close()
@@ -181,7 +182,7 @@ class TCPServer:
         """
         pass
 
-    def handle_error(self, request, client_address):
+    def handle_error(self, client_conn, client_address):
         logging.info('-'*40)
         logging.info('Exception happened during processing of request from')
         logging.info(client_address)
@@ -200,14 +201,19 @@ class TCPClientConnection:
         self.rfile = self.connection.makefile('rb', self.rbufsize)
         self.wfile = self.connection.makefile('wb', self.wbufsize)
 
-    def read_line(self):
-        return self.rfile.readline()
+    def read_line(self, size=-1):
+        return self.rfile.readline(size)
 
     def write_line(self, line):
-        self.write_message(line + '\r\n')
+        if line:
+            self.wfile.write(line.encode('UTF-8'))
+        self.wfile.write('\r\n'.encode('UTF-8'))
 
     def write_message(self, message):
         self.wfile.write(message.encode('UTF-8'))
+
+    def write_file(self, f):
+        shutil.copyfileobj(f, self.wfile)
 
     def shutdown_request(self):
         try:
@@ -216,13 +222,14 @@ class TCPClientConnection:
             pass  # some platforms may raise ENOTCONN here
 
     def close(self):
-        self.shutdown_request()
-
         if not self.wfile.closed:
             try:
                 self.wfile.flush()
             except socket.error:
                 pass
+
+        self.shutdown_request()
+
         self.wfile.close()
         self.rfile.close()
 

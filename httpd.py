@@ -1,67 +1,185 @@
 import logging
 from datetime import datetime
+import os
+from mimetypes import types_map
 
 from tcp_server import TCPServer
 
 HOST = 'localhost'
-PORT = 65432
+PORT = 65433
 
-NEWLINE = (b'\r\n', b'\n')
+NEWLINE = ('\r\n', '\n')
 
-RESPONSES = {
-    200: 'OK',
-    403: 'Forbidden',
-    404: 'Not Found',
-    405: 'Method Not Allowed'
-}
-
+DOCUMENT_ROOT = './httptest'
 
 class SimpleHTTPServer(TCPServer):
     server_version = 'SimpleHttpServer/1.0'
+    http_version = 'HTTP/1.1'
     headers = ''
 
+    MAX_URL_LENGTH = 65537
+
+    RESPONSES = {
+        200: 'OK',
+        400: 'Bad Request',
+        403: 'Forbidden',
+        404: 'Not Found',
+        405: 'Method Not Allowed',
+        414: 'Request-URI Too Long',
+        500: 'Server Internal Error'
+    }
+
+    HTTP_METHODS = {
+        'GET': 'do_get',
+        'HEAD': 'do_head'
+    }
+
     def process_request(self, client_conn):
-        self.read_request(client_conn)
-        self.write_response(client_conn, 200)
+        status_line = self.read_status_line(client_conn)
+        if not status_line:
+            return
 
-    def read_request(self, client_conn):
-        print('*' * 40)
-        print('Start process request')
+        request_info = self.parse_status_line(client_conn, status_line)
+        if not request_info:
+            return
 
-        cnt = 0
+        if not request_info['method'] in self.HTTP_METHODS:
+            self.write_response(client_conn, 405, 'Method {} Not Allowed'.format(request_info['method']))
+            return
+
+        headers = self.read_headers(client_conn)
+        if not headers:
+            return
+
+        method_name = self.HTTP_METHODS[request_info['method']]
+        http_method = getattr(self, method_name)
+        http_method(client_conn, request_info['target'], headers)
+
+    def read_status_line(self, client_conn):
+        status_line = client_conn.read_line(self.MAX_URL_LENGTH).decode('UTF-8')
+        if len(status_line) > self.MAX_URL_LENGTH - 1:
+            self.write_response(client_conn, 414)
+            return
+
+        return status_line
+
+    def parse_status_line(self, client_conn, line):
+        words = line.rstrip('\r\n').split()
+        if len(words):
+            method, target, version = words
+            if version[:5] != 'HTTP/':
+                self.write_response(client_conn, 400, "Bad request version {}".format(version))
+                return
+            try:
+                base_version_number = version.split('/', 1)[1]
+                version_number = base_version_number.split(".")
+                if len(version_number) != 2:
+                    raise ValueError
+                version_number = int(version_number[0]), int(version_number[1])
+            except (ValueError, IndexError):
+                self.write_response(client_conn, 400, "Bad request version {}".format(version))
+                return
+
+            if version_number >= (2, 0):
+                self.write_response(client_conn, 505, "Invalid HTTP Version {}".format(base_version_number))
+                return
+
+            return {'method': method, 'target': target}
+        elif not words:
+            return
+        else:
+            self.write_response(client_conn, 400, 'Bad request syntax {}'.format(line))
+
+    def read_headers(self, client_conn):
+        headers = {}
         while True:
-            line = client_conn.read_line()
-            print(line)
-            if line in NEWLINE:
+            header = client_conn.read_line().decode('UTF-8')
+            logging.info(header)
+            if not header or header in NEWLINE:
                 break
 
-            if cnt != 0:
-                self.headers += line.decode('UTF-8')
-            cnt += 1
+            if header.find(':') < 0:
+                self.write_response(client_conn, 400)
+                return
 
-        print('Finish process request')
-        print('*' * 40)
+            key, value = header.strip('\r\n').split(': ')
+            headers[key] = value
 
-    def write_response(self, client_conn, code):
-        self.send_status_line(client_conn, code, RESPONSES[code])
-        self.send_headers(client_conn)
+        return headers
+
+    def do_get(self, client_conn, target, headers):
+        logging.info('Process GET request')
+        self.send_file(client_conn, target, True)
+
+    def do_head(self, client_conn, target, headers):
+        logging.info('Process HEAD request')
+        self.send_file(client_conn, target, False)
+
+    def send_file(self, client_conn, target, send_content):
+        if '..' in target.split(os.sep):
+            self.write_response(client_conn, 403)
+            return
+
+        target = os.path.join(DOCUMENT_ROOT, target[1:])
+        if os.path.isdir(target):
+            target = os.path.join(target, 'index.html')
+
+        if not os.path.exists(target):
+            self.write_response(client_conn, 404)
+            return
+
+        f = None
+        try:
+            try:
+                f = open(target, 'rb')
+            except IOError:
+                self.write_response(client_conn, 404)
+                return
+
+            self.send_status_line(client_conn, 200, self.RESPONSES[200])
+            self.send_common_headers(client_conn)
+            fs = os.fstat(f.fileno())
+            self.send_header(client_conn, 'Content-Length', str(fs[6]))
+            self.send_header(client_conn, 'Content-Type', self.get_content_type(target))
+            self.end_headers(client_conn)
+            if send_content:
+                client_conn.write_file(f)
+        finally:
+            if f:
+                f.close()
+
+    def get_content_type(self, file_name):
+        content_type = types_map[os.path.splitext(file_name)[1]]
+        if content_type == 'text/html':
+            content_type += '; charset=UTF-8'
+
+    def write_response(self, client_conn, code, message = ''):
+        self.send_status_line(client_conn, code, message or self.RESPONSES[code])
+        self.send_common_headers(client_conn)
+        self.end_headers(client_conn)
 
     def send_status_line(self, client_conn, code, message):
-        client_conn.write_line('HTTP/1.1 {} {}'.format(code, message))
+        client_conn.write_line('{} {} {}'.format(self.http_version, code, message))
 
-    def send_headers(self, client_conn):
+    def send_common_headers(self, client_conn):
         self.send_header(client_conn, 'Date,', datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GTM'))
         self.send_header(client_conn, 'Server', self.server_version)
-        self.send_header(client_conn, 'Content-Length', '')
-        self.send_header(client_conn, 'Content-Type', 'text/plain; charset=utf-8')
-        self.send_header(client_conn, 'Connection', 'keep-alive')
+        self.send_header(client_conn, 'Connection', 'close')
 
     def send_header(self, client_conn, keyword, value):
         client_conn.write_line('{}: {}'.format(keyword, value))
 
+    def end_headers(self, client_conn):
+        client_conn.write_line('')
+
+    def handle_error(self, client_conn, client_address):
+        self.super.handle_error(self, client_conn, client_address)
+        self.write_response(client_conn, 500)
+
 
 if __name__ == "__main__":
-    logging.getLogger().setLevel(logging.INFO)
+    logging.basicConfig(format='%(asctime)s] %(levelname).1s %(message)s',
+                        datefmt='%Y.%m.%d %H:%M:%S', level=logging.INFO)
     logging.info("Starting server at {}".format(PORT))
 
     server = SimpleHTTPServer((HOST, PORT))
