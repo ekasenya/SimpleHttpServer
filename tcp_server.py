@@ -50,7 +50,7 @@ class TCPServer:
                 try:
                     conn, client_address = self.socket.accept()
                 except socket.error:
-                    self.handle_error(None, None)
+                    self.handle_error(None)
                     continue
 
                 self.executor.submit(self.handle_request, (conn, client_address))
