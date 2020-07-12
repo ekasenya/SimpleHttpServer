@@ -1,9 +1,9 @@
 import errno
 import logging
 import select
+import shutil
 import socket
 import threading
-import shutil
 
 
 def _eintr_retry(func, *args):
@@ -207,13 +207,17 @@ class TCPClientConnection:
     def write_line(self, line):
         if line:
             self.wfile.write(line.encode('UTF-8'))
+            logging.info('sent: {}'.format(line))
         self.wfile.write('\r\n'.encode('UTF-8'))
+        logging.info('sent: {}'.format('\\r\\n'))
 
     def write_message(self, message):
         self.wfile.write(message.encode('UTF-8'))
+        logging.info('sent: {}'.format(message))
 
     def write_file(self, f):
         shutil.copyfileobj(f, self.wfile)
+        logging.info('sent file')
 
     def shutdown_request(self):
         try:

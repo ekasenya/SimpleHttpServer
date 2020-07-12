@@ -1,7 +1,9 @@
 import logging
-from datetime import datetime
 import os
+from argparse import ArgumentParser
+from datetime import datetime
 from mimetypes import types_map
+from urllib.parse import unquote
 
 from tcp_server import TCPServer
 
@@ -10,7 +12,8 @@ PORT = 65433
 
 NEWLINE = ('\r\n', '\n')
 
-DOCUMENT_ROOT = './httptest'
+DEFAULT_DOCUMENT_ROOT = './'
+
 
 class SimpleHTTPServer(TCPServer):
     server_version = 'SimpleHttpServer/1.0'
@@ -34,8 +37,15 @@ class SimpleHTTPServer(TCPServer):
         'HEAD': 'do_head'
     }
 
+    def __init__(self, server_address, document_root):
+        super(SimpleHTTPServer, self).__init__(server_address)
+        self.document_root = document_root
+        print('document_root = {}'.format(document_root))
+
     def process_request(self, client_conn):
         status_line = self.read_status_line(client_conn)
+        logging.info('*' * 40)
+        logging.info('Process request {}'.format(status_line))
         if not status_line:
             return
 
@@ -48,12 +58,10 @@ class SimpleHTTPServer(TCPServer):
             return
 
         headers = self.read_headers(client_conn)
-        if not headers:
-            return
 
         method_name = self.HTTP_METHODS[request_info['method']]
         http_method = getattr(self, method_name)
-        http_method(client_conn, request_info['target'], headers)
+        http_method(client_conn, request_info['path'], headers)
 
     def read_status_line(self, client_conn):
         status_line = client_conn.read_line(self.MAX_URL_LENGTH).decode('UTF-8')
@@ -67,6 +75,7 @@ class SimpleHTTPServer(TCPServer):
         words = line.rstrip('\r\n').split()
         if len(words):
             method, target, version = words
+            path = os.path.normpath(unquote(target.split('?', 1)[0]))
             if version[:5] != 'HTTP/':
                 self.write_response(client_conn, 400, "Bad request version {}".format(version))
                 return
@@ -84,7 +93,7 @@ class SimpleHTTPServer(TCPServer):
                 self.write_response(client_conn, 505, "Invalid HTTP Version {}".format(base_version_number))
                 return
 
-            return {'method': method, 'target': target}
+            return {'method': method, 'path': path}
         elif not words:
             return
         else:
@@ -99,28 +108,27 @@ class SimpleHTTPServer(TCPServer):
                 break
 
             if header.find(':') < 0:
-                self.write_response(client_conn, 400)
-                return
-
-            key, value = header.strip('\r\n').split(': ')
-            headers[key] = value
+                key, value = header.strip('\r\n').split(': ')
+                headers[key] = value
+            else:
+                headers[header] = ''
 
         return headers
 
-    def do_get(self, client_conn, target, headers):
+    def do_get(self, client_conn, path, headers):
         logging.info('Process GET request')
-        self.send_file(client_conn, target, True)
+        self.send_file(client_conn, path, True)
 
-    def do_head(self, client_conn, target, headers):
+    def do_head(self, client_conn, path, headers):
         logging.info('Process HEAD request')
-        self.send_file(client_conn, target, False)
+        self.send_file(client_conn, path, False)
 
     def send_file(self, client_conn, target, send_content):
         if '..' in target.split(os.sep):
             self.write_response(client_conn, 403)
             return
 
-        target = os.path.join(DOCUMENT_ROOT, target[1:])
+        target = os.path.join(self.document_root, target[1:])
         if os.path.isdir(target):
             target = os.path.join(target, 'index.html')
 
@@ -136,7 +144,7 @@ class SimpleHTTPServer(TCPServer):
                 self.write_response(client_conn, 404)
                 return
 
-            self.send_status_line(client_conn, 200, self.RESPONSES[200])
+            self.send_status_line(client_conn, 200)
             self.send_common_headers(client_conn)
             fs = os.fstat(f.fileno())
             self.send_header(client_conn, 'Content-Length', str(fs[6]))
@@ -150,16 +158,15 @@ class SimpleHTTPServer(TCPServer):
 
     def get_content_type(self, file_name):
         content_type = types_map[os.path.splitext(file_name)[1]]
-        if content_type == 'text/html':
-            content_type += '; charset=UTF-8'
+        return content_type
 
-    def write_response(self, client_conn, code, message = ''):
-        self.send_status_line(client_conn, code, message or self.RESPONSES[code])
+    def write_response(self, client_conn, code, message=''):
+        self.send_status_line(client_conn, code, message)
         self.send_common_headers(client_conn)
         self.end_headers(client_conn)
 
-    def send_status_line(self, client_conn, code, message):
-        client_conn.write_line('{} {} {}'.format(self.http_version, code, message))
+    def send_status_line(self, client_conn, code, message=''):
+        client_conn.write_line('{} {} {}'.format(self.http_version, code, message or self.RESPONSES[code]))
 
     def send_common_headers(self, client_conn):
         self.send_header(client_conn, 'Date,', datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GTM'))
@@ -177,12 +184,19 @@ class SimpleHTTPServer(TCPServer):
         self.write_response(client_conn, 500)
 
 
+def get_document_root_dir():
+    parser = ArgumentParser()
+    parser.add_argument("--r", default=DEFAULT_DOCUMENT_ROOT)
+
+    return parser.parse_args().r
+
+
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s] %(levelname).1s %(message)s',
                         datefmt='%Y.%m.%d %H:%M:%S', level=logging.INFO)
     logging.info("Starting server at {}".format(PORT))
 
-    server = SimpleHTTPServer((HOST, PORT))
+    server = SimpleHTTPServer((HOST, PORT), get_document_root_dir())
     try:
         server.serve_forever()
     except KeyboardInterrupt:

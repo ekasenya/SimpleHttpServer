@@ -13,7 +13,7 @@ import unittest
 
 class HttpServer(unittest.TestCase):
     host = "localhost"
-    port = 80
+    port = 65433
 
     def setUp(self):
         self.conn = httplib.HTTPConnection(self.host, self.port, timeout=10)
@@ -333,5 +333,5 @@ class NewRunner(unittest.TextTestRunner):
     resultclass = NewResult
 
 
-runner = NewRunner(verbosity=2)
-runner.run(suite)
+#runner = NewRunner(verbosity=2)
+#runner.run(suite)
