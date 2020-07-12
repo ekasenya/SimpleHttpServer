@@ -7,10 +7,7 @@ v3 = sys.version_info[0] == 3
 import re
 import socket
 
-if v3:
-    import http.client as httplib
-else:
-    import httplib
+import http.client as httplib
 import unittest
 
 
