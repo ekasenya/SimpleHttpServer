@@ -1,72 +1,28 @@
-import errno
 import logging
-import select
 import shutil
 import socket
 import threading
-
-
-def _eintr_retry(func, *args):
-    """restart a system call interrupted by EINTR"""
-    while True:
-        try:
-            return func(*args)
-        except (OSError, select.error) as e:
-            if e.args[0] != errno.EINTR:
-                raise
+from concurrent.futures import ThreadPoolExecutor
 
 
 class TCPServer:
-    """Base class for various socket-based server classes.
-    Defaults to synchronous IP stream (i.e., TCP).
-    Methods for the caller:
-    - __init__(server_address, RequestHandlerClass, bind_and_activate=True)
-    - serve_forever(poll_interval=0.5)
-    - shutdown()
-    - handle_request()  # if you don't use serve_forever()
-    - fileno() -> int   # for select()
-    Methods that may be overridden:
-    - server_bind()
-    - server_activate()
-    - get_request() -> request, client_address
-    - handle_timeout()
-    - verify_request(request, client_address)
-    - process_request(request, client_address)
-    - shutdown_request(request)
-    - close_request(request)
-    - handle_error()
-    Methods for derived classes:
-    - finish_request(request, client_address)
-    Class variables that may be overridden by derived classes or
-    instances:
-    - timeout
-    - address_family
-    - socket_type
-    - request_queue_size (only for stream sockets)
-    - allow_reuse_address
-    Instance variables:
-    - server_address
-    - socket
-    """
-
     address_family = socket.AF_INET
-
     socket_type = socket.SOCK_STREAM
 
     request_queue_size = 5
 
     allow_reuse_address = False
 
-    timeout = None
-
-    def __init__(self, server_address):
-        """Constructor.  May be extended, do not override."""
+    def __init__(self, server_address, workers_count):
         self.server_address = server_address
+        self.workers_count = workers_count
         self.__is_shut_down = threading.Event()
         self.__shutdown_request = False
 
         self.socket = socket.socket(self.address_family,
                                     self.socket_type)
+
+        self.executor = ThreadPoolExecutor(max_workers=workers_count)
 
     def bind_and_activate(self):
         try:
@@ -77,118 +33,60 @@ class TCPServer:
             raise
 
     def server_bind(self):
-        """Bind the socket.
-        """
         if self.allow_reuse_address:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
         self.server_address = self.socket.getsockname()
 
     def server_activate(self):
-        """Activate the server.
-        """
         self.socket.listen(self.request_queue_size)
 
-    def serve_forever(self, poll_interval=0.5):
-        """Handle one request at a time until shutdown.
-        Polls for shutdown every poll_interval seconds. Ignores
-        self.timeout. If you need to do periodic tasks, do them in
-        another thread.
-        """
+    def serve_forever(self):
         self.bind_and_activate()
 
         self.__is_shut_down.clear()
         try:
             while not self.__shutdown_request:
-                # XXX: Consider using another file descriptor or
-                # connecting to the socket to wake this up instead of
-                # polling. Polling reduces our responsiveness to a
-                # shutdown request and wastes cpu at all other times.
-                r, w, e = _eintr_retry(select.select, [self], [], [],
-                                       poll_interval)
-                # bpo-35017: shutdown() called during select(), exit immediately.
-                if self.__shutdown_request:
-                    break
-                if self in r:
-                    self._handle_request_noblock()
+                try:
+                    conn, client_address = self.socket.accept()
+                except socket.error:
+                    self.handle_error(None, None)
+                    continue
+
+                self.executor.submit(self.handle_request, (conn, client_address))
         finally:
             self.__shutdown_request = False
             self.__is_shut_down.set()
 
     def server_close(self):
-        """Called to clean-up the server.
-        """
         self.socket.close()
 
-    def fileno(self):
-        """Return socket file number.
-        Interface required by select().
-        """
-        return self.socket.fileno()
-
     def shutdown(self):
-        """Stops the serve_forever loop.
-        Blocks until the loop has finished. This must be called while
-        serve_forever() is running in another thread, or it will
-        deadlock.
-        """
         self.__shutdown_request = True
         self.__is_shut_down.wait()
 
-    def handle_request(self):
-        """Handle one request, possibly blocking.
-        Respects self.timeout.
-        """
-        # Support people who used socket.settimeout() to escape
-        # handle_request before self.timeout was available.
-        timeout = self.socket.gettimeout()
-        if timeout is None:
-            timeout = self.timeout
-        elif self.timeout is not None:
-            timeout = min(timeout, self.timeout)
-        fd_sets = _eintr_retry(select.select, [self], [], [], timeout)
-        if not fd_sets[0]:
-            self.handle_timeout()
-            return
-        self._handle_request_noblock()
-
-    def _handle_request_noblock(self):
-        """Handle one request, without blocking.
-        I assume that select.select has returned that the socket is
-        readable before this function was called, so there should be
-        no risk of blocking in get_request().
-        """
-        try:
-            conn, client_address = self.socket.accept()
-            request = TCPClientConnection(conn, client_address)
-        except socket.error:
-            return
-
+    def handle_request(self, params):
+        request = TCPClientConnection(params[0], params[1])
         try:
             self.process_request(request)
         except Exception as e:
-            self.handle_error(conn, client_address)
+            self.handle_error(params[1])
         finally:
             request.close()
-
-    def handle_timeout(self):
-        """Called if no new request arrives within self.timeout.
-        Overridden by ForkingMixIn.
-        """
-        pass
 
     def process_request(self, request):
         """Process request and send answer if need. May be overridden.
         """
         pass
 
-    def handle_error(self, client_conn, client_address):
-        logging.info('-'*40)
-        logging.info('Exception happened during processing of request from')
-        logging.info(client_address)
+    def handle_error(self, client_address):
         import traceback
-        logging.info(traceback.format_exc())
-        logging.info('-'*40)
+        logging.info('----------------------------------------\r\n' 
+                     'Exception happened during processing of request\r\n{}'
+                     '{}\r\n'
+                     '----------------------------------------\r\n'
+                     .format(client_address + '\r\n' if client_address else '', traceback.format_exc())
+                     )
 
 
 class TCPClientConnection:
@@ -207,23 +105,19 @@ class TCPClientConnection:
     def write_line(self, line):
         if line:
             self.wfile.write(line.encode('UTF-8'))
-            logging.info('sent: {}'.format(line))
         self.wfile.write('\r\n'.encode('UTF-8'))
-        logging.info('sent: {}'.format('\\r\\n'))
 
     def write_message(self, message):
         self.wfile.write(message.encode('UTF-8'))
-        logging.info('sent: {}'.format(message))
 
     def write_file(self, f):
         shutil.copyfileobj(f, self.wfile)
-        logging.info('sent file')
 
     def shutdown_request(self):
         try:
             self.connection.shutdown(socket.SHUT_WR)
         except socket.error:
-            pass  # some platforms may raise ENOTCONN here
+            pass
 
     def close(self):
         if not self.wfile.closed:
@@ -238,5 +132,3 @@ class TCPClientConnection:
         self.rfile.close()
 
         self.connection.close()
-
-

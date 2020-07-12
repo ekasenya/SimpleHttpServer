@@ -13,7 +13,7 @@ import unittest
 
 class HttpServer(unittest.TestCase):
     host = "localhost"
-    port = 65433
+    port = 8080
 
     def setUp(self):
         self.conn = httplib.HTTPConnection(self.host, self.port, timeout=10)

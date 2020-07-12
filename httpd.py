@@ -8,11 +8,12 @@ from urllib.parse import unquote
 from tcp_server import TCPServer
 
 HOST = 'localhost'
-PORT = 65433
+PORT = 8080
 
 NEWLINE = ('\r\n', '\n')
 
 DEFAULT_DOCUMENT_ROOT = './'
+DEFAULT_WORKERS_COUNT = 5
 
 
 class SimpleHTTPServer(TCPServer):
@@ -37,15 +38,14 @@ class SimpleHTTPServer(TCPServer):
         'HEAD': 'do_head'
     }
 
-    def __init__(self, server_address, document_root):
-        super(SimpleHTTPServer, self).__init__(server_address)
+    def __init__(self, server_address, document_root, workers_count):
+        super(SimpleHTTPServer, self).__init__(server_address, workers_count)
         self.document_root = document_root
-        print('document_root = {}'.format(document_root))
 
     def process_request(self, client_conn):
         status_line = self.read_status_line(client_conn)
-        logging.info('*' * 40)
-        logging.info('Process request {}'.format(status_line))
+        self.log_request(status_line)
+
         if not status_line:
             return
 
@@ -103,7 +103,6 @@ class SimpleHTTPServer(TCPServer):
         headers = {}
         while True:
             header = client_conn.read_line().decode('UTF-8')
-            logging.info(header)
             if not header or header in NEWLINE:
                 break
 
@@ -116,11 +115,9 @@ class SimpleHTTPServer(TCPServer):
         return headers
 
     def do_get(self, client_conn, path, headers):
-        logging.info('Process GET request')
         self.send_file(client_conn, path, True)
 
     def do_head(self, client_conn, path, headers):
-        logging.info('Process HEAD request')
         self.send_file(client_conn, path, False)
 
     def send_file(self, client_conn, target, send_content):
@@ -179,16 +176,21 @@ class SimpleHTTPServer(TCPServer):
     def end_headers(self, client_conn):
         client_conn.write_line('')
 
-    def handle_error(self, client_conn, client_address):
-        self.super.handle_error(self, client_conn, client_address)
-        self.write_response(client_conn, 500)
+    def log_request(self, status_request_line):
+        logging.info('Request received: {}'.format(status_request_line.rstrip('\r\n')))
 
 
-def get_document_root_dir():
+def get_config_params():
     parser = ArgumentParser()
     parser.add_argument("--r", default=DEFAULT_DOCUMENT_ROOT)
+    parser.add_argument("--w", default=DEFAULT_WORKERS_COUNT)
 
-    return parser.parse_args().r
+    try:
+        w = int(parser.parse_args().w)
+    except ValueError:
+        w = DEFAULT_WORKERS_COUNT
+
+    return parser.parse_args().r, w
 
 
 if __name__ == "__main__":
@@ -196,7 +198,9 @@ if __name__ == "__main__":
                         datefmt='%Y.%m.%d %H:%M:%S', level=logging.INFO)
     logging.info("Starting server at {}".format(PORT))
 
-    server = SimpleHTTPServer((HOST, PORT), get_document_root_dir())
+    document_root, workers_count = get_config_params()
+
+    server = SimpleHTTPServer((HOST, PORT), document_root, workers_count)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
