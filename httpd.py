@@ -133,6 +133,16 @@ class SimpleHTTPServer(TCPServer):
             self.write_response(client_conn, 404)
             return
 
+        self.send_status_line(client_conn, 200)
+        self.send_common_headers(client_conn)
+        self.send_header(client_conn, 'Content-Length', str(os.path.getsize(target)))
+        self.send_header(client_conn, 'Content-Type', self.get_content_type(target))
+        self.end_headers(client_conn)
+
+        if send_content:
+            self.send_file_content(client_conn, target)
+
+    def send_file_content(self, client_conn, target):
         f = None
         try:
             try:
@@ -140,15 +150,7 @@ class SimpleHTTPServer(TCPServer):
             except IOError:
                 self.write_response(client_conn, 404)
                 return
-
-            self.send_status_line(client_conn, 200)
-            self.send_common_headers(client_conn)
-            fs = os.fstat(f.fileno())
-            self.send_header(client_conn, 'Content-Length', str(fs[6]))
-            self.send_header(client_conn, 'Content-Type', self.get_content_type(target))
-            self.end_headers(client_conn)
-            if send_content:
-                client_conn.write_file(f)
+            client_conn.write_file(f)
         finally:
             if f:
                 f.close()
